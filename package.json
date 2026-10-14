@@ -1,0 +1,8 @@
+{
+  "name": "xiaolv-ai-companion",
+  "version": "1.0.0",
+  "description": "小绿 · AI眼镜具象化助手 —— 住在 Rokid 眼镜里的具象化 AI 助手与养成陪伴伙伴（Open Agent Format）。",
+  "main": "app.js",
+  "author": "2026创业大赛参赛作品",
+  "dependencies": {}
+}
