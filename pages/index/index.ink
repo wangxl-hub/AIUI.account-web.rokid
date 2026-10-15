@@ -223,139 +223,68 @@ function expBar(state) {
 }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-/* ===== 接入 Rokid OpenAPI 灵珠智能体，SSE 流式获取大模型回答 =====
-   当用户输入不匹配任何预设场景时，通过 invokeAgentApi 连接灵珠智能体获取回答。
-   依据：rokid-openapi-usage skill
-   - 通过 import('open') -> createOpenAPI() 创建 API 实例（await）
-   - api.agent.invokeAgentApi({ body }) 返回 EventSource（不要 await）
-   - result.onmessage 接收事件，JSON.parse(e.data) 解析 payload
-   - 拼接 step==='content' 的 message.content 片段
-   - e.type==='end' 时展示完整回答（content 为空时用 final_answer 兜底）
-   - e.type==='error' 时展示 message.content 作为用户可见错误信息
-   - conversation_id 同一会话复用，关闭后重新打开时生成新 ID */
+/* 演示数据源：早安/日程/久坐/天气四类场景的静态展示文案。
+   TODO: 替换为设备端真实数据（天气 API / 日历事件 / IMU 静止检测），
+   保留字段结构（title/main/unit/line1/line2/timeline）即可无缝接入。 */
+var MOCK = {
+  morning: { title: '早上好！', main: '28° 晴', unit: '今日概览', line1: '日程：3 场会议 · 下一场 10:00 周会', line2: '降雨概率 10% · 紫外线中等', timeline: '09:00[~] -> 14:00[~] -> 18:00[!]' },
+  schedule: { title: '日程！', main: '10', unit: 'min 后开始', line1: '09:42 周度复盘会', line2: '3 号会议室 · 6 人', timeline: 'T-10min 跑入 -> T-1min 跳动 -> T-0 挥手告别' },
+  sedentaryAlert: { title: '久坐了！', main: '52', unit: 'min 未活动', line1: '站起来活动一下吧', line2: 'IMU 检测：静止时长阈值 50 min', timeline: '' },
+  sedentaryStand: { title: '站起来啦！', main: '已站立', unit: '反馈闭环：站立 >=10 秒', line1: '刚才静坐 52 min', line2: '', timeline: '' },
+  weather: { title: '下雨啦！', main: '2 小时后有雨', unit: '预警类型：降雨', line1: '建议：记得带伞', line2: '降温 6° · 东南风 3 级', timeline: '13:00 [~] -> 14:00 [!] -> 16:00 [~]' },
+};
 
-// 灵珠平台智能体 ID（用户提供，已在灵珠平台创建的实际智能体）
-var AGENT_ID = '7695229372914991104';
+/* ===== 定位意图识别 + 获取（aiui-dev skill geolocation.md / navigator.md） =====
+   navigator.geolocation.getCurrentPosition(success, error?, options?)
+   运行时事实库确认 Geolocation 接口存在、GEOLOCATION 权限 supported=true
+   定位失败/超时/不可用时返回 null 降级，不阻塞主流程 */
 
-function askAgent(question, self, s) {
-  var FALLBACK = '小绿暂时连不上云端大脑，换个说法或等会儿再问我~';
-  function finish(answer) {
-    if (!self || self._mode !== 'agent') return;
-    self._expr = 'happy';
-    var clean = (answer || '').replace(/\s+/g, ' ').trim() || FALLBACK;
-    var parts = splitAvatar('happy', s.level, s.race || 0);
-    self.setData({
-      cardTitle: 'AI 回答', exprLabel: '开心',
-      avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7],
-      face: faceForExpr('happy'), animKind: 'bounce', dotsOn: 'off',
-      cardMain: clean.slice(0, 20),
-      cardUnit: '小绿说',
-      cardLine1: clean.slice(20, 44),
-      cardLine2: clean.slice(44, 68),
-      bubble: '答案来啦 (^_^)',
-      cardTip: '小绿已联网为你解答',
-      cardClass: 'text',
-    });
-    self._animExpr = 'happy';
-  }
-  function finishError(errMsg) {
-    if (!self || self._mode !== 'agent') return;
-    self._expr = 'happy';
-    var msg = (errMsg || '').replace(/\s+/g, ' ').trim() || FALLBACK;
-    var parts = splitAvatar('happy', s.level, s.race || 0);
-    self.setData({
-      cardTitle: '出错了', exprLabel: '开心',
-      avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7],
-      face: faceForExpr('happy'), animKind: 'bounce', dotsOn: 'off',
-      cardMain: msg.slice(0, 20),
-      cardUnit: '小绿说',
-      cardLine1: msg.slice(20, 44),
-      cardLine2: '',
-      bubble: '出了点小问题',
-      cardTip: '换个说法再试试',
-      cardClass: 'text',
-    });
-    self._animExpr = 'happy';
-  }
-  // 会话 ID：同一会话复用，首次生成
-  if (!self._agentConversationId) {
-    self._agentConversationId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-  }
-  var result = null;
-  var content = '';
-  try {
-    // 动态导入 open 模块，createOpenAPI() 返回 Promise，需 .then() 获取 api 实例
-    import('open').then(function (mod) {
-      return mod.createOpenAPI();
-    }).then(function (api) {
-      // invokeAgentApi 返回 EventSource，不要 await
-      result = api.agent.invokeAgentApi({
-        body: {
-          conversation_id: self._agentConversationId,
-          agent_id: AGENT_ID,
-          question: question
-        }
-      });
-      // SSE 事件处理（rokid-openapi-usage skill）
-      // e.type: 'data'/'inProgress' = 中间流式输出, 'end'/'done' = 完成, 'error' = 可捕获错误
-      result.onmessage = function (e) {
-        // 1. 先处理 error 事件：独立路径，不依赖 content 累积
-        if (e.type === 'error') {
-          var errMsg = '';
-          try {
-            var errPayload = JSON.parse(e.data);
-            if (errPayload && errPayload.message && errPayload.message.content) {
-              errMsg = errPayload.message.content;
-            }
-          } catch (err) {
-            // parse 失败时用通用错误文案
+// 意图识别：判断问题是否需要获取定位
+function needsLocation(text) {
+  return /(天气|下雨|降雨|带伞|降温|气温|温度|大风|热不热|冷不冷|穿什么|附近|周边|最近|哪里有|哪家|周围|旁边|怎么走|导航|路线|多远|在哪|地址)/.test(text);
+}
+
+// 获取定位：返回 Promise<coords|null>，8 秒超时降级
+function getLocation() {
+  return new Promise(function (resolve) {
+    var resolved = false;
+    function done(val) { if (!resolved) { resolved = true; resolve(val); } }
+    try {
+      if (typeof navigator === 'undefined' || !navigator.geolocation || typeof navigator.geolocation.getCurrentPosition !== 'function') {
+        done(null); return;
+      }
+      // 超时兜底：8 秒后强制降级
+      var timer = setTimeout(function () { done(null); }, 8000);
+      navigator.geolocation.getCurrentPosition(
+        function (position) {
+          clearTimeout(timer);
+          if (position && position.coords) {
+            done({ latitude: position.coords.latitude, longitude: position.coords.longitude });
+          } else {
+            done(null);
           }
-          finishError(errMsg || FALLBACK);
-          return;
-        }
-
-        // 2. 解析 payload（非 error 事件）
-        var payload = null;
-        try {
-          payload = JSON.parse(e.data);
-        } catch (err) {
-          // parse 失败：静默跳过该事件，不崩溃
-          return;
-        }
-        if (!payload) return;
-
-        // 3. content 片段拼接：step==='content' 且 message.content 非空
-        //    适用于 data/inProgress/end/done 类型事件
-        if (payload.step === 'content' && payload.message && payload.message.content) {
-          content += payload.message.content;
-        }
-
-        // 4. end/done 事件：展示完整回答
-        //    优先用拼接的 content，为空时用 final_answer 兜底
-        if (e.type === 'end' || e.type === 'done') {
-          var answer = content;
-          if (!answer && payload.message && payload.message.final_answer) {
-            answer = payload.message.final_answer;
-          }
-          finish(answer);
-        }
-      };
-    })['catch'](function (err) {
-      // createOpenAPI 或 invokeAgentApi 失败
-      finishError(FALLBACK);
-    });
-  } catch (e) {
-    // 同步异常兜底
-    finishError(FALLBACK);
-  }
+        },
+        function (error) {
+          clearTimeout(timer);
+          console.error('[getLocation] 定位失败:', error && error.code, error && error.message);
+          done(null);
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+      );
+    } catch (e) {
+      console.error('[getLocation] 异常:', e && (e.message || String(e)));
+      done(null);
+    }
+  });
 }
 
 /* ===== 设计稿 5.1 三种交互层级 ===== */
 var L1 = 'L1 感知层';
 var L2 = 'L2 通知层';
 var L3 = 'L3 互动层';
+
+// 思考超时：灵珠首条 content 超过该时长未到达则断连并提示重新提问（真机联调后可酌情放宽）
+var THINK_TIMEOUT_MS = 15000;
 
 export default {
   data: {
@@ -396,6 +325,18 @@ export default {
   _animExpr: 'idle',
   _animStep: 0,
   _recognition: null,
+  _asrTimeout: null,
+  _interruptTimer: null,
+  _listening: false,
+  _agentId: '7695229372914991104',
+  _agentConversationId: null,
+  _api: null,
+  _fallbackTimers: [],
+  _thinkTimer: null,
+  _thinkCounter: null,
+  _thinkStarted: false,
+  _thinkSeconds: 0,
+  _eventSource: null,
   onLoad() {
     this.acts = ['morning', 'schedule', 'sedentary', 'weather', 'qa', 'companion', 'confirm', 'cycleExpr', 'reset'];
     this.toIdle(true);
@@ -410,50 +351,338 @@ export default {
     this.stopAmbient();
     this.stopAnim();
     this.stopRecognition();
+    this.clearAsrTimeout();
+    if (this._interruptTimer) { clearTimeout(this._interruptTimer); this._interruptTimer = null; }
+    if (this._fallbackTimers) { this._fallbackTimers.forEach(function (t) { clearTimeout(t); }); this._fallbackTimers = []; }
+    this.clearThinkTimers();
+    this.closeEventSource();
+  },
+  // 清除思考超时和计时的辅助方法
+  clearThinkTimers() {
+    if (this._thinkTimer) { clearTimeout(this._thinkTimer); this._thinkTimer = null; }
+    if (this._thinkCounter) { clearInterval(this._thinkCounter); this._thinkCounter = null; }
+  },
+  // 关闭 EventSource 并释放引用
+  closeEventSource() {
+    try {
+      if (this._eventSource && typeof this._eventSource.close === 'function') {
+        this._eventSource.close();
+      }
+    } catch (e) {}
+    this._eventSource = null;
   },
   /* ===== ASR 语音识别通道（references/apis/ai.md: SpeechRecognition） =====
      onVoiceWakeup 是宿主唤醒信号回调，不自动建立 ASR 通道。
      需主动创建 SpeechRecognition 实例并调用 start() 建立通道。
      start() 必须在 InkView 交互状态下调用（onVoiceWakeup / bindtap 均满足）。
-     onresult 接收识别结果，提取 transcript 调用 handleInput 路由。 */
+     onresult 接收识别结果，提取 transcript 调用 handleInput 路由。
+
+     语音输入等待：startRecognition 后设 10 秒超时定时器，
+     onresult 触发时清除超时；超时未触发则播报"没有听太清"并回 idle。
+     语音打断：用户说"小绿小绿"时，先 abort 当前 ASR + cancel 语音播报，
+     播报"我在呢，你请说"，再重启 ASR 等待下一轮输入。 */
+  clearAsrTimeout() {
+    if (this._asrTimeout) {
+      clearTimeout(this._asrTimeout);
+      this._asrTimeout = null;
+    }
+  },
+  // 语音播报辅助函数（aiui-dev skill ai.md: speechSynthesis.speak）
+  speak(text) {
+    try {
+      speechSynthesis.cancel();
+      var u = new SpeechSynthesisUtterance(text);
+      u.volume = 1.0; // SpeechSynthesisUtterance.volume 取值 0~1，超范围会被裁剪且异常
+      speechSynthesis.speak(u); // 第二参数 'enqueue' 非标准，靠 cancel() 控制队列
+    } catch (e) {
+      console.error('[speak] 语音播报失败:', e && (e.message || String(e)));
+    }
+  },
+  /* ===== 接入 Rokid OpenAPI 灵珠智能体，SSE 流式获取大模型回答 =====
+     skill 标准写法：await import('open') + await createOpenAPI()
+     在页面方法中调用 OpenAPI（skill 推荐）
+     api.agent.invokeAgentApi({ body }) 返回 EventSource，不要 await
+     SSE 事件处理：error 独立路径，content 片段逐条拼接
+     Currently use the concatenated message.content as the response;
+     do not depend on or replace it with message.final_answer */
+  async askAgent(question, s) {
+    var self = this;
+    var FALLBACK = '小绿暂时连不上云端大脑，换个说法或等会儿再问我~';
+
+    /* 统一渲染灵珠回答/错误：合并原 finish/finishError，错误态表情改为 alert */
+    function renderAnswer(opts) {
+      if (!self || self._mode !== 'agent') return;
+      self._expr = opts.expr || 'happy';
+      var raw = (opts.answer || '').replace(/\s+/g, ' ').trim();
+      var clean = raw || FALLBACK;
+      self.setData(Object.assign(self.setAvatar(self._expr, s.level, s.race || 0), {
+        cardTitle: opts.title || '',
+        exprLabel: opts.exprLabel || exprLabelOf(self._expr),
+        face: faceForExpr(self._expr),
+        animKind: 'bounce',
+        dotsOn: 'off',
+        cardMain: clean.slice(0, 20),
+        cardUnit: opts.unit || '小绿说',
+        cardLine1: clean.slice(20, 44),
+        cardLine2: (opts.line2 !== undefined ? opts.line2 : clean.slice(44, 68)),
+        bubble: opts.bubble || '',
+        cardTip: opts.tip || '',
+        cardClass: opts.cardClass || 'text',
+      }));
+      self._animExpr = self._expr;
+      // 语音播报：完全按照灵珠智能体返回的内容/错误信息播报
+      // 空内容时等待 3 秒再用 FALLBACK 兜底，保证用户有听觉反馈
+      // 开始语音播报时停止思考计时
+      if (raw) {
+        self.clearThinkTimers();
+        self.speak(raw);
+      } else {
+        var fbTimer = setTimeout(function () {
+          self.clearThinkTimers();
+          self.speak(FALLBACK);
+          // 触发后从队列移除，避免定时器泄漏
+          if (self._fallbackTimers) {
+            var fi = self._fallbackTimers.indexOf(fbTimer);
+            if (fi >= 0) self._fallbackTimers.splice(fi, 1);
+          }
+        }, 3000);
+        if (!self._fallbackTimers) self._fallbackTimers = [];
+        self._fallbackTimers.push(fbTimer);
+      }
+    }
+    function finish(answer) {
+      renderAnswer({ title: 'AI 回答', exprLabel: '开心', unit: '小绿说', bubble: '答案来啦 (^_^)', tip: '小绿已联网为你解答', expr: 'happy', answer: answer });
+    }
+    function finishError(errMsg) {
+      renderAnswer({ title: '出错了', exprLabel: '警觉', unit: '小绿说', bubble: '出了点小问题', tip: '换个说法再试试', expr: 'alert', line2: '', answer: errMsg });
+    }
+
+    // 会话 ID：同一会话复用，首次生成
+    if (!self._agentConversationId) {
+      self._agentConversationId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+
+    var content = '';
+    try {
+      // skill 标准写法：await import('open') 解构 + await createOpenAPI()
+      // 在页面方法中调用 OpenAPI（skill 推荐，不作为全局方法）
+      var mod = await import('open');
+      console.log('[askAgent] open 模块加载成功, mod keys:', Object.keys(mod || {}));
+      var api = await mod.createOpenAPI();
+      console.log('[askAgent] createOpenAPI 成功, api keys:', Object.keys(api || {}));
+      if (api && api.agent) {
+        console.log('[askAgent] api.agent keys:', Object.keys(api.agent));
+      }
+      if (!api || !api.agent || typeof api.agent.invokeAgentApi !== 'function') {
+        console.error('[askAgent] api.agent.invokeAgentApi 不存在, api 结构:', JSON.stringify(api ? Object.keys(api) : 'null'));
+        finishError(FALLBACK);
+        return;
+      }
+      // invokeAgentApi 返回 EventSource，不要 await
+      var result = api.agent.invokeAgentApi({
+        body: {
+          conversation_id: self._agentConversationId,
+          agent_id: self._agentId,
+          question: question
+        }
+      });
+      // 保存 EventSource 引用，便于超时时关闭
+      self._eventSource = result;
+      // 思考超时机制：THINK_TIMEOUT_MS 内未收到首条 content 则断开连接，提示用户重新提问
+      self._thinkStarted = false;
+      self._thinkSeconds = 0;
+      self._thinkTimer = setTimeout(function () {
+        if (self._thinkStarted) return; // 已开始思考，忽略超时
+        // 断开 EventSource
+        self.closeEventSource();
+        // 清除思考计时器（保留 _thinkTimer 的清理给 clearThinkTimers）
+        self.clearThinkTimers();
+        // 语音播报超时提示
+        self.speak('思考超时了，请重新提问');
+        // 显示超时态，回待机
+        self.setData({
+          cardTitle: '思考超时',
+          cardMain: '请重新提问',
+          cardUnit: '',
+          cardLine1: '小绿等了 15 秒还没收到回应',
+          cardLine2: '',
+          cardTip: '请重新说一次你的问题',
+          bubble: '超时了，再说一次吧',
+          cardClass: 'text',
+        });
+        self.toIdle();
+      }, THINK_TIMEOUT_MS);
+      // SSE 事件处理（aiui-cloud-apis skill invoke-agent-api.md）
+      // e.type: 'data'/'inProgress' = 中间流式输出, 'end'/'done' = 完成, 'error' = 可捕获错误
+      result.onmessage = function (e) {
+        // 1. 先处理 error 事件：独立路径，不依赖 content 累积
+        if (e.type === 'error') {
+          var errMsg = '';
+          try {
+            var errPayload = JSON.parse(e.data);
+            if (errPayload && errPayload.message && errPayload.message.content) {
+              errMsg = errPayload.message.content;
+            }
+            console.error('[askAgent] SSE error 事件:', e.data, errPayload);
+          } catch (err) {
+            console.error('[askAgent] SSE error 事件 JSON.parse 失败:', err, 'raw:', e.data);
+          }
+          finishError(errMsg || FALLBACK);
+          return;
+        }
+
+        // 2. 解析 payload（非 error 事件）
+        var payload = null;
+        try {
+          payload = JSON.parse(e.data);
+        } catch (err) {
+          console.error('[askAgent] SSE 事件 JSON.parse 失败:', err, 'type:', e.type, 'raw:', e.data);
+          return;
+        }
+        if (!payload) return;
+
+        // 3. thought / action 事件：统一展示为思考态
+        //    不向用户展示具体思考内容和插件调用细节
+        //    只启动思考计时器，表情保持 thinking，cardTip 显示"小绿正在思考..."
+        if (payload.step === 'thought' || payload.step === 'action') {
+          if (!self._thinkStarted) {
+            self._thinkStarted = true;
+            if (self._thinkTimer) { clearTimeout(self._thinkTimer); self._thinkTimer = null; }
+            self._thinkCounter = setInterval(function () {
+              if (!self || self._mode !== 'agent') { self.clearThinkTimers(); return; }
+              self._thinkSeconds++;
+              self.setData({ cardTip: '小绿正在思考... ' + self._thinkSeconds + 's' });
+            }, 1000);
+          }
+        }
+
+        // 5. content 片段拼接：step==='content' 且 message.content 非空
+        //    收到首条 content 时清除 10 秒思考超时并启动思考计时器
+        //    content 拼接期间继续计时，直到 finish() 收到完整答案后停止
+        //    skill: Currently use the concatenated message.content as the response;
+        //    do not depend on or replace it with message.final_answer
+        if (payload.step === 'content' && payload.message && payload.message.content) {
+          // 收到首条 content：清除 10 秒思考超时，启动思考计时器
+          if (!self._thinkStarted) {
+            self._thinkStarted = true;
+            if (self._thinkTimer) { clearTimeout(self._thinkTimer); self._thinkTimer = null; }
+            self._thinkCounter = setInterval(function () {
+              if (!self || self._mode !== 'agent') { self.clearThinkTimers(); return; }
+              self._thinkSeconds++;
+              self.setData({ cardTip: '小绿正在思考... ' + self._thinkSeconds + 's' });
+            }, 1000);
+          }
+          content += payload.message.content;
+        }
+
+        // 6. end/done 事件：展示完整回答（只用 content 拼接结果）
+        if (e.type === 'end' || e.type === 'done') {
+          finish(content);
+        }
+      };
+    } catch (err) {
+      // import / createOpenAPI / invokeAgentApi 失败
+      console.error('[askAgent] import/createOpenAPI/invokeAgentApi 失败:', err && (err.message || err.stack || JSON.stringify(err)) || String(err));
+      finishError(FALLBACK);
+    }
+  },
+  // 定位增强版：先判断是否需要定位 → 获取定位 → 拼接 question → 调用 askAgent
+  async askAgentWithLocation(question, s) {
+    var self = this;
+    if (!needsLocation(question)) {
+      // 不需要定位，直接调用
+      this.askAgent(question, s);
+      return;
+    }
+    // 需要定位：显示"正在获取定位…"思考态
+    if (self._mode === 'agent') {
+      self.setData({
+        cardTitle: '定位中…',
+        cardTip: '正在获取你的位置信息',
+        bubble: '定位中…',
+      });
+    }
+    var coords = await getLocation();
+    var finalQuestion = question;
+    if (coords) {
+      finalQuestion = '[当前位置：经度' + coords.longitude.toFixed(4) + ', 纬度' + coords.latitude.toFixed(4) + '] ' + question;
+      if (self._mode === 'agent') {
+        self.setData({
+          cardTitle: '思考中...',
+          cardTip: '已获取定位，连接云端大脑…',
+          bubble: '让我想想…',
+        });
+      }
+    } else {
+      if (self._mode === 'agent') {
+        self.setData({
+          cardTitle: '思考中...',
+          cardTip: '定位不可用，直接回答…',
+          bubble: '让我想想…',
+        });
+      }
+    }
+    self.askAgent(finalQuestion, s);
+  },
   startRecognition() {
     var self = this;
-    // 先清理已有实例
+    // 先清理已有实例和超时定时器
     this.stopRecognition();
+    this.clearAsrTimeout();
     try {
       var recognition = new SpeechRecognition();
       recognition.lang = 'zh-CN';
       recognition.continuous = false;
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
-      // 识别结果：提取 transcript 调用 handleInput
+      // 语音输入直接调用灵珠智能体进行意图识别和搜索答案
+      // 不走本地预设场景匹配，由灵珠智能体统一处理意图
       recognition.onresult = function (event) {
+        self.clearAsrTimeout();
+        self._listening = false;
         try {
           var results = event.results;
           var idx = event.resultIndex;
           if (results && results[idx] && results[idx][0] && results[idx][0].transcript) {
             var transcript = results[idx][0].transcript.trim();
-            if (transcript) self.handleInput(transcript);
+            if (transcript) self.handleVoiceInput(transcript);
           }
         } catch (e) {}
       };
-      // 错误处理：回待机态
+      // 错误处理：清除超时，回待机态
       recognition.onerror = function (event) {
+        self.clearAsrTimeout();
+        self._listening = false;
         try {
-          var errMsg = (event && event.error) ? event.error : '未知错误';
+          var errMsg = (event && event.message) ? event.message : ((event && event.error) ? event.error : '未知错误');
           self.setData({ bubble: '语音识别异常: ' + errMsg });
         } catch (e) {}
         self._recognition = null;
       };
-      // 识别结束：清理实例引用
+      // 识别结束：清理实例引用和超时
       recognition.onend = function () {
+        self.clearAsrTimeout();
+        self._listening = false;
         self._recognition = null;
       };
       // 建立 ASR 通道
       recognition.start();
       this._recognition = recognition;
+      this._listening = true;
+      // 10 秒超时兜底：没有语音输入则播报"没有听太清"并回 idle
+      this._asrTimeout = setTimeout(function () {
+        self._listening = false;
+        self._asrTimeout = null;
+        // 停止当前识别
+        self.stopRecognition();
+        // 播报"没有听太清"
+        self.speak('没有听太清');
+        // 回待机态
+        self.toIdle();
+      }, 10000);
     } catch (e) {
       // SpeechRecognition 不可用或 start() 失败（InvalidStateError 等）
+      this._listening = false;
       try {
         this.setData({ bubble: '语音通道暂不可用，可用按钮交互' });
       } catch (e2) {}
@@ -465,21 +694,81 @@ export default {
         this._recognition.abort();
         this._recognition = null;
       }
+      this._listening = false;
     } catch (e) {}
   },
-  // 语音唤醒回调：ASR 识别结果通过 event.keyword 提交（events.md 文档依据）
-  // onVoiceWakeup 是宿主唤醒信号，触发后主动建立 ASR 通道接收后续语音输入
+  // 语音打断：用户呼叫"小绿小绿"时，打断当前 ASR 和语音播报，回应"我在呢，你请说"，再重启 ASR
+  interruptForWakeup() {
+    // 1. 停止当前 ASR 识别
+    this.stopRecognition();
+    this.clearAsrTimeout();
+    // 2. 取消正在播放的语音播报（aiui-dev skill ai.md: speechSynthesis.cancel）
+    try { speechSynthesis.cancel(); } catch (e) {}
+    // 3. 播报"我在呢，你请说"
+    this.speak('我在呢，你请说');
+    // 4. 显示打断反馈
+    var s = decay(load());
+    this.apply(s, {
+      mode: 'companion', expr: 'wave', layer: L3,
+      anim: 'bounce',
+      title: '我在呢',
+      main: '我在呢，你请说',
+      unit: '',
+      line1: '',
+      line2: '',
+      timeline: '', tip: '语音打断 · 重新聆听中',
+      card: 'text', bubble: '我在呢，你请说~',
+      ttl: 0,
+      hint: '请说出你的问题',
+    });
+    // 5. 延迟 1.5 秒后重启 ASR 通道（等待播报结束）
+    var self = this;
+    if (this._interruptTimer) { clearTimeout(this._interruptTimer); }
+    this._interruptTimer = setTimeout(function () {
+      self._interruptTimer = null;
+      self.startRecognition();
+    }, 1500);
+  },
+  // 语音唤醒回调（events.md 文档依据）
+  // onVoiceWakeup 是宿主唤醒信号，触发后：
+  // - "小绿"/"小绿小绿" → 语音打断路径（无论当前状态）
+  // - 其他 keyword / clickAiAssist → 直接调用灵珠智能体进行意图识别
+  // - 之后建立 ASR 通道接收后续语音输入
   onVoiceWakeup(event) {
     try {
       var kw = event.keyword || '';
-      if (kw && kw !== 'clickAiAssist' && kw !== '乐奇' && kw !== 'Hi Rokid') {
-        this.handleInput(kw);
-      } else if (kw === '乐奇' || kw === 'Hi Rokid') {
-        this.handleInput('小绿');
+      // 语音打断："小绿"/"小绿小绿"/"乐奇"/"Hi Rokid" 视为唤醒呼叫
+      if (kw === '小绿' || kw === '小绿小绿' || kw === '乐奇' || kw === 'Hi Rokid') {
+        this.interruptForWakeup();
+        return;
+      }
+      // 其他 keyword / clickAiAssist 直接调用灵珠智能体进行意图识别和搜索答案
+      if (kw) {
+        this.handleVoiceInput(kw);
       }
       // 建立 ASR 通道：onVoiceWakeup 是宿主交互信号，满足 start() 的交互状态要求
       this.startRecognition();
     } catch (e) { this.toIdle(); }
+  },
+  // 语音输入专用路由：直接调用灵珠智能体进行意图识别和搜索答案
+  // 不走本地预设场景匹配，由灵珠智能体统一处理所有意图
+  handleVoiceInput(text) {
+    var t = (text || '').trim();
+    if (!t) { this.toIdle(); return; }
+    var s = decay(load());
+    // 显示思考态，连接灵珠智能体
+    this.apply(s, {
+      mode: 'agent', expr: 'thinking', layer: L3,
+      anim: 'think', dots: true,
+      title: '思考中...',
+      main: '',
+      unit: '联网回答',
+      line1: '', line2: '', timeline: '',
+      tip: '小绿正在连接云端大脑…',
+      card: 'text', bubble: '让我想想…', ttl: 0,
+      hint: '语音输入 · 灵珠智能体意图识别',
+    });
+    this.askAgentWithLocation(t, s);
   },
   // 头部动作：点头=确认，摇头=忽略/关闭（events.md 文档依据）
   onHeadGesture(event) {
@@ -545,13 +834,10 @@ export default {
           var back = function (delay) {
             setTimeout(function () {
               var st = load();
-              var parts = splitAvatar(self._expr || 'idle', st.level, st.race || 0);
-              self.setData({
-                avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7],
+              self.setData(Object.assign(self.setAvatar(self._expr || 'idle', st.level, st.race || 0), {
                 animKind: animForExpr(self._expr || 'idle'),
                 exprLabel: exprLabelOf(self._expr || 'idle'),
-              });
+              }));
               self._animExpr = self._expr || 'idle';
             }, delay);
           };
@@ -568,10 +854,8 @@ avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], av
           } else {
             // 打哈欠：切困倦形态
             if (exprUnlocked('sleepy', st0.level)) {
-              var parts = splitAvatar('sleepy', st0.level, st0.race || 0);
               self._animExpr = 'sleep';
-              self.setData({ avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7], animKind: 'sleep', exprLabel: '打哈欠' });
+              self.setData(Object.assign(self.setAvatar('sleepy', st0.level, st0.race || 0), { animKind: 'sleep', exprLabel: '打哈欠' }));
             } else {
               self.setData({ exprLabel: '打哈欠' });
             }
@@ -591,6 +875,15 @@ avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], av
       bars: '心情' + bar(s.mood) + ' 精力' + bar(s.energy) + ' 亲密' + bar(s.intimacy) + ' 饱食' + bar(s.satiety),
     });
   },
+  /* 渲染助手：根据表情/等级/种族生成 16 个像素矩阵字段的 patch，
+     消除各场景重复的 avatarBright0..7 / avatarMid0..7 内联赋值 */
+  setAvatar(expr, level, race) {
+    var parts = splitAvatar(expr, level, race || 0);
+    return {
+      avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
+      avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7]
+    };
+  },
   // 统一渲染入口：scene = 卡片内容 + 层级 + 表情 + 按钮
   apply(s, scene) {
     this._mode = scene.mode;
@@ -598,10 +891,7 @@ avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], av
     save(s);
     this.renderStats(s);
     var expr = scene.free ? (exprUnlocked(scene.expr, s.level) ? scene.expr : 'idle') : scene.expr;
-    var parts = splitAvatar(expr, s.level, s.race || 0);
-    var patch = {
-      avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7],
+    var patch = Object.assign(this.setAvatar(expr, s.level, s.race || 0), {
       face: faceForExpr(expr),
       animKind: scene.anim || animForExpr(expr),
       dotsOn: scene.dots ? 'on' : 'off',
@@ -691,14 +981,7 @@ avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], av
         setTimeout(function () {
           if (selfm._mode !== 'morning') return;
           selfm._expr = 'happy';
-          var p = splitAvatar('happy', s.level, s.race || 0);
-          selfm.setData({
-            avatarBright0: p.bright[0], avatarBright1: p.bright[1], avatarBright2: p.bright[2], avatarBright3: p.bright[3], avatarBright4: p.bright[4], avatarBright5: p.bright[5], avatarBright6: p.bright[6], avatarBright7: p.bright[7],
-avatarMid0: p.mid[0], avatarMid1: p.mid[1], avatarMid2: p.mid[2], avatarMid3: p.mid[3], avatarMid4: p.mid[4], avatarMid5: p.mid[5], avatarMid6: p.mid[6], avatarMid7: p.mid[7],
-            face: faceForExpr('happy'),
-            animKind: 'bounce',
-            exprLabel: '开心',
-          });
+          selfm.setData(Object.assign(selfm.setAvatar('happy', s.level, s.race || 0), { face: faceForExpr('happy'), animKind: 'bounce', exprLabel: '开心' }));
           selfm._animExpr = 'bounce';
         }, 1200);
       } catch (e) {}
@@ -723,7 +1006,7 @@ avatarMid0: p.mid[0], avatarMid1: p.mid[1], avatarMid2: p.mid[2], avatarMid3: p.
         hint: '小绿正在连接云端大脑…',
       };
       if (up5) this.levelUp(s, sc5); else this.apply(s, sc5);
-      askAgent(t, this, s);
+      this.askAgentWithLocation(t, s);
       return;
     }
 
@@ -827,14 +1110,7 @@ avatarMid0: p.mid[0], avatarMid1: p.mid[1], avatarMid2: p.mid[2], avatarMid3: p.
         setTimeout(function () {
           if (self6._mode !== 'companion') return;
           self6._expr = 'happy';
-          var p6 = splitAvatar('happy', s.level, s.race || 0);
-          self6.setData({
-            avatarBright0: p6.bright[0], avatarBright1: p6.bright[1], avatarBright2: p6.bright[2], avatarBright3: p6.bright[3], avatarBright4: p6.bright[4], avatarBright5: p6.bright[5], avatarBright6: p6.bright[6], avatarBright7: p6.bright[7],
-avatarMid0: p6.mid[0], avatarMid1: p6.mid[1], avatarMid2: p6.mid[2], avatarMid3: p6.mid[3], avatarMid4: p6.mid[4], avatarMid5: p6.mid[5], avatarMid6: p6.mid[6], avatarMid7: p6.mid[7],
-            face: faceForExpr('happy'),
-            animKind: 'bounce',
-            exprLabel: '说话',
-          });
+          self6.setData(Object.assign(self6.setAvatar('happy', s.level, s.race || 0), { face: faceForExpr('happy'), animKind: 'bounce', exprLabel: '说话' }));
           self6._animExpr = 'bounce';
         }, 1000);
       } catch (e) {}
@@ -929,7 +1205,7 @@ avatarMid0: p6.mid[0], avatarMid1: p6.mid[1], avatarMid2: p6.mid[2], avatarMid3:
       hint: '不匹配预设场景 · 连接大模型回答',
     };
     this.apply(s, scAgent);
-    askAgent(t, this, s);
+    this.askAgentWithLocation(t, s);
   },
 
   /* ===== 设计稿 5.2 输入方式：语音（主要）/ 触控镜腿（辅助）/ 头部动作 ===== */
@@ -954,9 +1230,7 @@ avatarMid0: p6.mid[0], avatarMid1: p6.mid[1], avatarMid2: p6.mid[2], avatarMid3:
     var next = order[(i + 1) % order.length];
     if (!exprUnlocked(next, s.level)) next = 'idle';
     this._expr = next;
-    var parts = splitAvatar(next, s.level, s.race || 0);
-    this.setData({ avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7], face: faceForExpr(next), animKind: animForExpr(next), exprLabel: exprLabelOf(next) });
+    this.setData(Object.assign(this.setAvatar(next, s.level, s.race || 0), { face: faceForExpr(next), animKind: animForExpr(next), exprLabel: exprLabelOf(next) }));
     this._animExpr = animForExpr(next);
   },
   onTapI() {
@@ -976,9 +1250,7 @@ avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], av
     if (s.level < 10) { this.setData({ bubble: 'Lv.10 才解锁种族切换哦' }); return; }
     s.race = ((s.race || 0) + 1) % RACES.length;
     save(s);
-    var parts = splitAvatar(this._expr || 'idle', s.level, s.race);
-    this.setData({ avatarBright0: parts.bright[0], avatarBright1: parts.bright[1], avatarBright2: parts.bright[2], avatarBright3: parts.bright[3], avatarBright4: parts.bright[4], avatarBright5: parts.bright[5], avatarBright6: parts.bright[6], avatarBright7: parts.bright[7],
-avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], avatarMid3: parts.mid[3], avatarMid4: parts.mid[4], avatarMid5: parts.mid[5], avatarMid6: parts.mid[6], avatarMid7: parts.mid[7], bubble: '种族切换：' + RACES[s.race].label });
+    this.setData(Object.assign(this.setAvatar(this._expr || 'idle', s.level, s.race), { bubble: '种族切换：' + RACES[s.race].label }));
   },
 };
 </script>
@@ -987,7 +1259,7 @@ avatarMid0: parts.mid[0], avatarMid1: parts.mid[1], avatarMid2: parts.mid[2], av
   <view class="card">
     <!-- 第一优先级：角色形象（让用户知道这是谁在说话） -->
     <view class="col col-left">
-      <!-- 设计稿 3.5：AI 处理中 -> 思考动画 + 头顶省略号闪烁（三点错峰） -->
+      <!-- 设计稿 3.5：AI 处理中 思考动画 + 头顶省略号闪烁（三点错峰） -->
       <view class="dotsrow {{ dotsOn }}">
         <text class="dot d1">•</text>
         <text class="dot d2">•</text>
