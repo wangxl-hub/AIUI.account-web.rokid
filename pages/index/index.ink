@@ -337,6 +337,7 @@ export default {
   _thinkStarted: false,
   _thinkSeconds: 0,
   _eventSource: null,
+  _llmFallbackTimer: null,
   onLoad() {
     this.acts = ['morning', 'schedule', 'sedentary', 'weather', 'qa', 'companion', 'confirm', 'cycleExpr', 'reset'];
     this.toIdle(true);
@@ -354,6 +355,7 @@ export default {
     this.clearAsrTimeout();
     if (this._interruptTimer) { clearTimeout(this._interruptTimer); this._interruptTimer = null; }
     if (this._fallbackTimers) { this._fallbackTimers.forEach(function (t) { clearTimeout(t); }); this._fallbackTimers = []; }
+    if (this._llmFallbackTimer) { clearTimeout(this._llmFallbackTimer); this._llmFallbackTimer = null; }
     this.clearThinkTimers();
     this.closeEventSource();
   },
@@ -379,6 +381,7 @@ export default {
 
      语音输入等待：startRecognition 后设 10 秒超时定时器，
      onresult 触发时清除超时；超时未触发则播报"没有听太清"并回 idle。
+     此阶段不启动思考计时器。
      语音打断：用户说"小绿小绿"时，先 abort 当前 ASR + cancel 语音播报，
      播报"我在呢，你请说"，再重启 ASR 等待下一轮输入。 */
   clearAsrTimeout() {
@@ -451,10 +454,35 @@ export default {
       }
     }
     function finish(answer) {
+      answered = true;
       renderAnswer({ title: 'AI 回答', exprLabel: '开心', unit: '小绿说', bubble: '答案来啦 (^_^)', tip: '小绿已联网为你解答', expr: 'happy', answer: answer });
     }
     function finishError(errMsg) {
+      answered = true;
       renderAnswer({ title: '出错了', exprLabel: '警觉', unit: '小绿说', bubble: '出了点小问题', tip: '换个说法再试试', expr: 'alert', line2: '', answer: errMsg });
+    }
+    // 回退通道：AIUI 端侧内置大模型（LanguageModel），无外部 key、密钥不外泄
+    // 仅在灵珠 3s 无首响应、或灵珠通道整体不可用时调用
+    async function callBuiltinLLM() {
+      answered = true; // 标记已接管，屏蔽后续灵珠迟到事件
+      try {
+        if (typeof LanguageModel === 'undefined') throw new Error('LanguageModel 不可用');
+        var status = await LanguageModel.availability();
+        if (status !== 'available') throw new Error('LanguageModel 不可用');
+        var session = await LanguageModel.create({
+          initialPrompts: [{ role: 'system', content: '你是住在 Rokid 眼镜里的具象化 AI 助手「小绿」，用简洁口语化中文回答，不超过 60 字。' }]
+        });
+        var ans = await session.prompt(question);
+        try { session.destroy(); } catch (e) {}
+        if (self._mode !== 'agent') return;
+        var clean = (ans || '').replace(/\s+/g, ' ').trim();
+        if (!clean) throw new Error('空回答');
+        renderAnswer({ title: 'AI 回答', exprLabel: '开心', unit: '小绿说', bubble: '答案来啦 (^_^)', tip: 'AIUI 内置大模型', expr: 'happy', answer: clean });
+      } catch (e) {
+        console.error('[askAgent] 内置大模型失败:', e && (e.message || String(e)));
+        if (self._mode !== 'agent') return;
+        renderAnswer({ title: '出错了', exprLabel: '警觉', unit: '小绿说', bubble: '出了点小问题', tip: '换个说法再试试', expr: 'alert', line2: '', answer: FALLBACK });
+      }
     }
 
     // 会话 ID：同一会话复用，首次生成
@@ -463,6 +491,7 @@ export default {
     }
 
     var content = '';
+    var answered = false; // 任一通道（灵珠/内置大模型）已给出最终答案后置 true，屏蔽迟到事件
     try {
       // skill 标准写法：await import('open') 解构 + await createOpenAPI()
       // 在页面方法中调用 OpenAPI（skill 推荐，不作为全局方法）
@@ -475,7 +504,7 @@ export default {
       }
       if (!api || !api.agent || typeof api.agent.invokeAgentApi !== 'function') {
         console.error('[askAgent] api.agent.invokeAgentApi 不存在, api 结构:', JSON.stringify(api ? Object.keys(api) : 'null'));
-        finishError(FALLBACK);
+        callBuiltinLLM();
         return;
       }
       // invokeAgentApi 返回 EventSource，不要 await
@@ -489,6 +518,7 @@ export default {
       // 保存 EventSource 引用，便于超时时关闭
       self._eventSource = result;
       // 思考超时机制：THINK_TIMEOUT_MS 内未收到首条 content 则断开连接，提示用户重新提问
+      // 思考计时从此处开始（invokeAgentApi 返回后），语音输入等待阶段不启动此计时
       self._thinkStarted = false;
       self._thinkSeconds = 0;
       self._thinkTimer = setTimeout(function () {
@@ -512,9 +542,24 @@ export default {
         });
         self.toIdle();
       }, THINK_TIMEOUT_MS);
+      // 3 秒无首响应（thought/content/action 均未到达）则回退 AIUI 内置大模型
+      self._llmFallbackTimer = setTimeout(function () {
+        if (answered) return;
+        if (self._thinkStarted) return; // 灵珠已开始返回，不回退
+        // 关闭灵珠流并切换内置大模型
+        self.closeEventSource();
+        if (self._thinkTimer) { clearTimeout(self._thinkTimer); self._thinkTimer = null; }
+        self.clearThinkTimers();
+        self.setData({ cardTitle: '思考中...', cardTip: '灵珠响应慢，切换本地大模型…', bubble: '让我想想…' });
+        callBuiltinLLM();
+      }, 3000);
       // SSE 事件处理（aiui-cloud-apis skill invoke-agent-api.md）
       // e.type: 'data'/'inProgress' = 中间流式输出, 'end'/'done' = 完成, 'error' = 可捕获错误
       result.onmessage = function (e) {
+        // 已由内置大模型接管或已出答案：屏蔽灵珠迟到事件
+        if (answered) return;
+        // 任意灵珠事件到达即取消 3 秒回退计时
+        if (self._llmFallbackTimer) { clearTimeout(self._llmFallbackTimer); self._llmFallbackTimer = null; }
         // 1. 先处理 error 事件：独立路径，不依赖 content 累积
         if (e.type === 'error') {
           var errMsg = '';
@@ -581,9 +626,9 @@ export default {
         }
       };
     } catch (err) {
-      // import / createOpenAPI / invokeAgentApi 失败
+      // import / createOpenAPI / invokeAgentApi 失败：回退 AIUI 内置大模型
       console.error('[askAgent] import/createOpenAPI/invokeAgentApi 失败:', err && (err.message || err.stack || JSON.stringify(err)) || String(err));
-      finishError(FALLBACK);
+      callBuiltinLLM();
     }
   },
   // 定位增强版：先判断是否需要定位 → 获取定位 → 拼接 question → 调用 askAgent
@@ -594,7 +639,7 @@ export default {
       this.askAgent(question, s);
       return;
     }
-    // 需要定位：显示"正在获取定位…"思考态
+    // 需要定位：显示"正在获取定位…"连接态
     if (self._mode === 'agent') {
       self.setData({
         cardTitle: '定位中…',
@@ -608,16 +653,16 @@ export default {
       finalQuestion = '[当前位置：经度' + coords.longitude.toFixed(4) + ', 纬度' + coords.latitude.toFixed(4) + '] ' + question;
       if (self._mode === 'agent') {
         self.setData({
-          cardTitle: '思考中...',
-          cardTip: '已获取定位，连接云端大脑…',
+          cardTitle: '连接中...',
+          cardTip: '已获取定位，正在发送给灵珠智能体…',
           bubble: '让我想想…',
         });
       }
     } else {
       if (self._mode === 'agent') {
         self.setData({
-          cardTitle: '思考中...',
-          cardTip: '定位不可用，直接回答…',
+          cardTitle: '连接中...',
+          cardTip: '定位不可用，正在发送给灵珠智能体…',
           bubble: '让我想想…',
         });
       }
@@ -670,6 +715,7 @@ export default {
       this._recognition = recognition;
       this._listening = true;
       // 10 秒超时兜底：没有语音输入则播报"没有听太清"并回 idle
+      // 此阶段不启动思考计时器，思考计时从 invokeAgentApi 返回后开始
       this._asrTimeout = setTimeout(function () {
         self._listening = false;
         self._asrTimeout = null;
@@ -752,19 +798,21 @@ export default {
   },
   // 语音输入专用路由：直接调用灵珠智能体进行意图识别和搜索答案
   // 不走本地预设场景匹配，由灵珠智能体统一处理所有意图
+  // 此阶段显示连接态（连接中...），不启动思考计时，思考计时从 invokeAgentApi 返回后开始
   handleVoiceInput(text) {
     var t = (text || '').trim();
     if (!t) { this.toIdle(); return; }
     var s = decay(load());
-    // 显示思考态，连接灵珠智能体
+    // 显示连接态：语音输入已收到，正在发送给灵珠智能体
+    // 此阶段不启动思考计时，思考计时从 invokeAgentApi 返回后开始
     this.apply(s, {
-      mode: 'agent', expr: 'thinking', layer: L3,
-      anim: 'think', dots: true,
-      title: '思考中...',
+      mode: 'agent', expr: 'alert', layer: L3,
+      anim: 'shake', dots: true,
+      title: '连接中...',
       main: '',
       unit: '联网回答',
       line1: '', line2: '', timeline: '',
-      tip: '小绿正在连接云端大脑…',
+      tip: '正在发送给灵珠智能体…',
       card: 'text', bubble: '让我想想…', ttl: 0,
       hint: '语音输入 · 灵珠智能体意图识别',
     });
@@ -907,7 +955,7 @@ export default {
       cardClass: scene.card || 'status',
       bubble: scene.bubble || '',
       hint: scene.hint || this.data.hint,
-    };
+    });
     this.setData(patch);
     this._animExpr = scene.anim || animForExpr(expr);
     // L2 通知层：3-5 秒自动消失回待机（设计稿 5.1）
@@ -965,12 +1013,12 @@ export default {
       var up = addExp(s, gain);
       var scene = {
         mode: 'morning', expr: 'wave', layer: L2,
-        title: '早上好！',
-        main: '28° 晴',
-        unit: '今日概览',
-        line1: '日程：3 场会议 · 下一场 10:00 周会',
-        line2: '降雨概率 10% · 紫外线中等',
-        timeline: '09:00[~] -> 14:00[~] -> 18:00[!]',
+        title: MOCK.morning.title,
+        main: MOCK.morning.main,
+        unit: MOCK.morning.unit,
+        line1: MOCK.morning.line1,
+        line2: MOCK.morning.line2,
+        timeline: MOCK.morning.timeline,
         tip: '今日首次佩戴 +' + gain + ' EXP',
         card: 'double', bubble: '早上好呀~', ttl: 5000,
         hint: '首次佩戴触发 · 停留 5 秒后收回状态栏',
@@ -988,22 +1036,22 @@ export default {
       return;
     }
 
-    /* ---- 场景5 AI 问答互动（S级）：思考动画 -> 连接灵珠智能体获取回答 ---- */
+    /* ---- 场景5 AI 问答互动（S级）：连接灵珠智能体获取回答 ---- */
     if (/(是什么|什么是|为什么|怎么办|怎么办呢|如何做|怎样|请问一下|解释一下|是什么意思|区别是什么|哪个更好|值得买吗|推荐一下)/.test(t)) {
       var g5 = 0;
       if (s.qaCount < 10) { s.qaCount++; g5 += 1; }
       var up5 = addExp(s, g5);
       var sc5 = {
-        mode: 'agent', expr: 'thinking', layer: L3,
-        anim: 'think', dots: true,
-        title: '思考中...',
+        mode: 'agent', expr: 'alert', layer: L3,
+        anim: 'shake', dots: true,
+        title: '连接中...',
         main: '',
         unit: '联网回答',
         line1: '',
         line2: '',
         timeline: '', tip: g5 ? '完成问答 +' + g5 + ' EXP' : '每日问答上限 10 次',
         card: 'text', bubble: '让我想想…', ttl: 0,
-        hint: '小绿正在连接云端大脑…',
+        hint: '正在发送给灵珠智能体…',
       };
       if (up5) this.levelUp(s, sc5); else this.apply(s, sc5);
       this.askAgentWithLocation(t, s);
@@ -1018,12 +1066,12 @@ export default {
       var sc2 = {
         mode: 'schedule', expr: 'alert', layer: L2,
         anim: 'bounce',
-        title: '日程！',
-        main: '10',
-        unit: 'min 后开始',
-        line1: '09:42 周度复盘会',
-        line2: '3 号会议室 · 6 人',
-        timeline: 'T-10min 跑入 -> T-1min 跳动 -> T-0 挥手告别',
+        title: MOCK.schedule.title,
+        main: MOCK.schedule.main,
+        unit: MOCK.schedule.unit,
+        line1: MOCK.schedule.line1,
+        line2: MOCK.schedule.line2,
+        timeline: MOCK.schedule.timeline,
         tip: g2 ? '查看日程 +' + g2 + ' EXP' : '轻触镜腿 -> 查看详情',
         card: 'single', bubble: '该开会啦！', ttl: 4500,
         hint: '日历事件前 10 分钟自动触发',
@@ -1040,24 +1088,24 @@ export default {
         var up3 = addExp(s, g3);
         var sc3 = {
           mode: 'sedentary', expr: 'happy', layer: L2,
-          title: '站起来啦！',
-          main: '已站立',
-          unit: '反馈闭环：站立 >=10 秒',
-          line1: '刚才静坐 52 min',
+          title: MOCK.sedentaryStand.title,
+          main: MOCK.sedentaryStand.main,
+          unit: MOCK.sedentaryStand.unit,
+          line1: MOCK.sedentaryStand.line1,
           line2: '本次 +' + g3 + ' EXP（今日 ' + s.standCount + '/4）',
-          timeline: '', tip: '真棒！活动一下对身体好~', card: 'single', bubble: '谢谢配合 (^_^)', ttl: 3500,
+          timeline: MOCK.sedentaryStand.timeline, tip: '真棒！活动一下对身体好~', card: 'single', bubble: '谢谢配合 (^_^)', ttl: 3500,
           hint: 'IMU 检测静止 50 分钟 -> 站立响应给奖励',
         };
         if (up3) this.levelUp(s, sc3); else this.apply(s, sc3);
       } else {
         this.apply(s, {
           mode: 'sedentary', expr: 'alert', layer: L2,
-          title: '久坐了！',
-          main: '52',
-          unit: 'min 未活动',
-          line1: '站起来活动一下吧',
-          line2: 'IMU 检测：静止时长阈值 50 min',
-          timeline: '', tip: '站立 +3 EXP', card: 'single', bubble: '动一动嘛！', ttl: 4000,
+          title: MOCK.sedentaryAlert.title,
+          main: MOCK.sedentaryAlert.main,
+          unit: MOCK.sedentaryAlert.unit,
+          line1: MOCK.sedentaryAlert.line1,
+          line2: MOCK.sedentaryAlert.line2,
+          timeline: MOCK.sedentaryAlert.timeline, tip: '站立 +3 EXP', card: 'single', bubble: '动一动嘛！', ttl: 4000,
           hint: '说站起来响应即可获得奖励',
         });
       }
@@ -1071,12 +1119,12 @@ export default {
       var up4 = addExp(s, g4);
       var sc4 = {
         mode: 'weather', expr: 'surprised', layer: L2,
-        title: '下雨啦！',
-        main: '2 小时后有雨',
-        unit: '预警类型：降雨',
-        line1: '建议：记得带伞',
-        line2: '降温 6° · 东南风 3 级',
-        timeline: '13:00 [~] -> 14:00 [!] -> 16:00 [~]',
+        title: MOCK.weather.title,
+        main: MOCK.weather.main,
+        unit: MOCK.weather.unit,
+        line1: MOCK.weather.line1,
+        line2: MOCK.weather.line2,
+        timeline: MOCK.weather.timeline,
         tip: g4 ? '响应提醒 +' + g4 + ' EXP' : '底部建议闪烁提醒',
         card: 'timeline', bubble: '别淋湿啦！', ttl: 4500,
         hint: '天气 API 检测未来 2 小时降雨 / 降温',
@@ -1193,14 +1241,13 @@ export default {
     }
     // 兜底：不匹配任何预设场景 -> 连接灵珠智能体获取大模型回答
     var scAgent = {
-      mode: 'agent', expr: 'thinking', layer: L3,
-      anim: 'think', dots: true,
-      title: '思考中...',
+      mode: 'agent', expr: 'alert', layer: L3,
+      anim: 'shake', dots: true,
+      title: '连接中...',
       main: '',
       unit: '联网回答',
-      line1: '',
-      line2: '',
-      timeline: '', tip: '小绿正在连接云端大脑…',
+      line1: '', line2: '',
+      timeline: '', tip: '正在发送给灵珠智能体…',
       card: 'text', bubble: '让我想想…', ttl: 0,
       hint: '不匹配预设场景 · 连接大模型回答',
     };
