@@ -30,40 +30,40 @@ const DEFAULT_STATE = {
 };
 
 /* ===== 角色视觉系统：8x8 像素矩阵，三层明度 =====
-   █ = 亮绿(#00ff88)   ░ = 中绿(#00aa55)   空格 = 灭
+   █ = 亮绿(#00ff88)     = 中绿(#00aa55)   空格 = 灭
    形态取自设计稿 2.1 基础形态 + 2.2 表情状态库（开心/警觉/思考/困倦/打招呼/惊讶）
-   多色渲染：splitRows() 将每行拆为 bright(█/▓) 和 mid(░) 两组字符串，
+   多色渲染：splitRows() 将每行拆为 bright(█/▓) 和 mid( ) 两组字符串，
    模板用两个 text 叠放 position:absolute 分别着色 #00ff88 / #00aa55 */
 const BASE = [
-  "  ░██░  ",
-  " ░████░ ",
-  "░██████░",
+  "   ██   ",
+  "  ████  ",
+  " ██████ ",
   "██    ██",
   "███  ███",
-  "░██████░",
-  " ░█░░█░ ",
-  "  ░  ░  "
+  " ██████ ",
+  "  █  █  ",
+  "        "
 ];
 const AVATAR = {
   idle:      BASE,
-  happy:     ["  ░██░  ", " ░████░ ", "░██████░", "██ ██ ██", "██ ██ ██", "░██████░", " ░█░░█░ ", "  ░  ░  "],
-  alert:     ["  ░██░  ", " ░████░ ", "░██████░", "█  ██  █", "███  ███", "░██████░", " ░█░░█░ ", "  ░  ░  "],
-  thinking:  ["  ░██░  ", " ░████░ ", "░██████░", "█ █  █ █", "████████", "░██████░", " ░█░░█░ ", "  ░  ░  "],
-  sleepy:    ["  ░░░░  ", " ░████░ ", "░██████░", "███  ███", "████████", "░██████░", "  ░  ░  ", "        "],
-  wave:      ["  ░██░  ", " ░████░ ", "░██████░", " █    ██", " ██  ███", "░██████░", " ░█░░█░ ", "  ░  ░  "],
-  surprised: ["  ░██░  ", " ░████░ ", "░██████░", "█      █", "██ ██ ██", "░██████░", " ░█░░█░ ", "  ░  ░  "],
+  happy:     ["   ██   ", "  ████  ", " ██████ ", "██ ██ ██", "██ ██ ██", " ██████ ", "  █  █  ", "        "],
+  alert:     ["   ██   ", "  ████  ", " ██████ ", "█  ██  █", "███  ███", " ██████ ", "  █  █  ", "        "],
+  thinking:  ["   ██   ", "  ████  ", " ██████ ", "█ █  █ █", "████████", " ██████ ", "  █  █  ", "        "],
+  sleepy:    ["        ", "  ████  ", " ██████ ", "███  ███", "████████", " ██████ ", "        ", "        "],
+  wave:      ["   ██   ", "  ████  ", " ██████ ", "░█    ██", " ██  ███", " ██████ ", "  █  █  ", "        "],
+  surprised: ["   ██   ", "  ████  ", " ██████ ", "█      █", "██ ██ ██", " ██████ ", "  █  █  ", "        "],
 };
 // 设计稿 7.2：Lv10+ 解锁种族切换（小人 / 小动物 / 小机器人）
 const RACES = [
   { key: 'human', label: '像素小人', rows: null },
-  { key: 'beast', label: '小动物', rows: ["  ░  ░  ", " ░████░ ", "░██████░", "██ ██ ██", "░██████░", " ██  ██ ", " ░█  █░ ", " ░    ░ "] },
-  { key: 'robot', label: '小机器人', rows: ["  ████  ", " █    █ ", "█ ████ █", "█ █  █ █", "█      █", "░██████░", " ░█  █░ ", " ░████░ "] },
+  { key: 'beast', label: '小动物', rows: ["        ", "  ████  ", " ██████ ", "██ ██ ██", " ██████ ", " ██  ██ ", "  █  █  ", "        "] },
+  { key: 'robot', label: '小机器人', rows: ["  ████  ", " █    █ ", "█ ████ █", "█ █  █ █", "█      █", " ██████ ", "  █  █  ", "  ████  "] },
 ];
 // 设计稿 7.2：Lv4-6 配饰解锁（帽子 / 围巾 / 背包），每级 1 件
 const ACCESSORY = {
   4: { name: '小绿帽', apply: function (m) { var r = m.slice(); r[0] = " ██████ "; return r; } },
-  5: { name: '围巾',   apply: function (m) { var r = m.slice(); r[4] = "░██████░"; return r; } },
-  6: { name: '背包',   apply: function (m) { var r = m.slice(); r[3] = r[3].substring(0, 6) + "██"; r[4] = r[4].substring(0, 6) + "░░"; return r; } },
+  5: { name: '围巾',   apply: function (m) { var r = m.slice(); r[4] = " ██████ "; return r; } },
+  6: { name: '背包',   apply: function (m) { var r = m.slice(); r[3] = r[3].substring(0, 6) + "██"; r[4] = r[4].substring(0, 6) + "  "; return r; } },
 };
 
 function avatarRows(expr, level, race) {
@@ -81,7 +81,7 @@ function avatarRows(expr, level, race) {
 function avatarStr(expr, level, race) { return avatarRows(expr, level, race).join('\n'); }
 
 /* splitRows：将矩阵拆为 bright 和 mid 两组字符串
-   bright 行中 ░/空格 替换为空格（只保留 █▓），mid 行中 █▓ 替换为空格（只保留 ░）
+   bright 行中  /空格 替换为空格（只保留 █▓），mid 行中 █▓ 替换为空格（只保留  ）
    模板用两个 text position:absolute 叠放，分别着色 #00ff88 / #00aa55 */
 function splitRows(rows) {
   var bright = [], mid = [];
@@ -89,7 +89,7 @@ function splitRows(rows) {
     var row = rows[i];
     /* WXSS 禁用 white-space：\n 与连续空格会被折叠成一行（实测 8 行塌成 4 行 / 44px）。
        对策：①每行独立元素（模板 8 个 text）②空格全部换成不换行空格 U+00A0（等宽且不被折叠）。 */
-    bright.push(row.replace(/░/g, ' ').replace(/ /g, '\u00a0'));
+    bright.push(row.replace(/ /g, ' ').replace(/ /g, '\u00a0'));
     mid.push(row.replace(/[█▓]/g, ' ').replace(/ /g, '\u00a0'));
   }
   return { bright: bright, mid: mid };
@@ -214,12 +214,12 @@ function addExp(state, n) {
 }
 function bar(v) {
   var n = Math.round(clamp(v, 0, 100) / 10);
-  return '█'.repeat(n) + '░'.repeat(10 - n);
+  return '█'.repeat(n) + ' '.repeat(10 - n);
 }
 function expBar(state) {
   var need = expThreshold(state.level);
   var n = Math.round(clamp(state.exp / need, 0, 1) * 10);
-  return '█'.repeat(n) + '░'.repeat(10 - n);
+  return '█'.repeat(n) + ' '.repeat(10 - n);
 }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
@@ -391,7 +391,7 @@ var THINK_TIMEOUT_MS = 15000;
 
 export default {
   data: {
-    // 多色像素矩阵：bright(█▓) 和 mid(░) 两组叠放
+    // 多色像素矩阵：bright(█▓) 和 mid( ) 两组叠放
     avatarBright0: splitAvatar('idle', 1, 0).bright[0], avatarBright1: splitAvatar('idle', 1, 0).bright[1], avatarBright2: splitAvatar('idle', 1, 0).bright[2], avatarBright3: splitAvatar('idle', 1, 0).bright[3], avatarBright4: splitAvatar('idle', 1, 0).bright[4], avatarBright5: splitAvatar('idle', 1, 0).bright[5], avatarBright6: splitAvatar('idle', 1, 0).bright[6], avatarBright7: splitAvatar('idle', 1, 0).bright[7],
     avatarMid0: splitAvatar('idle', 1, 0).mid[0], avatarMid1: splitAvatar('idle', 1, 0).mid[1], avatarMid2: splitAvatar('idle', 1, 0).mid[2], avatarMid3: splitAvatar('idle', 1, 0).mid[3], avatarMid4: splitAvatar('idle', 1, 0).mid[4], avatarMid5: splitAvatar('idle', 1, 0).mid[5], avatarMid6: splitAvatar('idle', 1, 0).mid[6], avatarMid7: splitAvatar('idle', 1, 0).mid[7],
     face: '(._.)',
@@ -404,7 +404,7 @@ export default {
     rank: '初始期·基础形态',
     exprLabel: '待机',
     expText: '0 / 100',
-    expBar: '░░░░░░░░░░',
+    expBar: '          ',
     // 卡片区（设计稿 6.1 卡片类型）
     layerText: L1,
     cardTitle: '',
@@ -1394,7 +1394,7 @@ export default {
         <text class="dot d2">•</text>
         <text class="dot d3">•</text>
       </view>
-      <!-- 多色像素矩阵：bright(█▓) 和 mid(░) 两个 text 叠放分别着色 -->
+      <!-- 多色像素矩阵：bright(█▓) 和 mid( ) 两个 text 叠放分别着色 -->
       <view class="avatar-wrap">
         <view class="avatar-bright" style="opacity: {{ avatarOpacity }}; transform: {{ avatarTransform }};">
           <text class="arow">{{ avatarBright0 }}</text>
