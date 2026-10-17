@@ -1,0 +1,41 @@
+# ===== Rokid AIUI / Open Agent Format 项目忽略规则 =====
+
+# --- 依赖（Node / 子项目 OminiBuddy 安装产物） ---
+node_modules/
+.pnpm-store/
+.npm
+.yarn/
+
+# --- Rokid 构建/打包产物 ---
+# .aix 为 Rokid AIUI 编译打包产物，非源码，不纳入版本库
+*.aix
+dist/
+build/
+output/
+.release/
+
+# --- 日志与临时文件 ---
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+logs/
+
+# --- 环境变量 / 密钥 ---
+.env
+.env.local
+.env.*.local
+
+# --- 操作系统 / 编辑器产物 ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- 说明 ---
+# 如需保留构建产物或特定压缩包，请按需放开对应规则；
+# 此前已手动删除仓库内的 xiaolv-ai-companion.zip，未做全局 zip 忽略。
