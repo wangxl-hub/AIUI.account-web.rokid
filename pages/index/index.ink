@@ -328,6 +328,10 @@ export default {
   _asrTimeout: null,
   _interruptTimer: null,
   _listening: false,
+  _asrGotResult: false,
+  _asrRestartTimer: null,
+  _asrRestartCount: 0,
+  _wakeupBusy: false,
   _agentId: '7695229372914991104',
   _agentConversationId: null,
   _api: null,
@@ -354,6 +358,7 @@ export default {
     this.stopRecognition();
     this.clearAsrTimeout();
     if (this._interruptTimer) { clearTimeout(this._interruptTimer); this._interruptTimer = null; }
+    if (this._asrRestartTimer) { clearTimeout(this._asrRestartTimer); this._asrRestartTimer = null; }
     if (this._fallbackTimers) { this._fallbackTimers.forEach(function (t) { clearTimeout(t); }); this._fallbackTimers = []; }
     if (this._llmFallbackTimer) { clearTimeout(this._llmFallbackTimer); this._llmFallbackTimer = null; }
     this.clearThinkTimers();
@@ -671,20 +676,57 @@ export default {
   },
   startRecognition() {
     var self = this;
-    // 先清理已有实例和超时定时器
+    // 先清理已有实例、超时定时器与待执行的重启定时器
     this.stopRecognition();
     this.clearAsrTimeout();
+    if (this._asrRestartTimer) { clearTimeout(this._asrRestartTimer); this._asrRestartTimer = null; }
+    // 本轮识别尚未拿到结果
+    this._asrGotResult = false;
+
+    // 先显示"聆听中"状态，让用户知道语音通道正在建立
+    var s = decay(load());
+    this.apply(s, {
+      mode: 'listening', expr: 'alert', layer: L3,
+      anim: 'shake', dots: true,
+      title: '聆听中',
+      main: '请说出你的问题',
+      unit: '语音输入',
+      line1: '', line2: '', timeline: '',
+      tip: '正在聆听… 10 秒内说出问题',
+      card: 'text', bubble: '我在听…', ttl: 0,
+      hint: '10 秒内说出问题即可',
+    });
+
+    // 检查 SpeechRecognition 全局构造器是否存在
+    if (typeof SpeechRecognition === 'undefined') {
+      console.error('[startRecognition] SpeechRecognition 全局构造器不存在');
+      self.setData({ bubble: '语音识别不可用，请用按钮交互' });
+      self.speak('语音识别不可用，请用按钮交互');
+      var t0 = setTimeout(function () { self.toIdle(); }, 2000);
+      return;
+    }
+
     try {
       var recognition = new SpeechRecognition();
       recognition.lang = 'zh-CN';
       recognition.continuous = false;
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
+
+      // onstart：确认 ASR 通道已建立
+      recognition.onstart = function () {
+        try {
+          self.setData({ bubble: '正在聆听…', cardTip: '请说出你的问题' });
+        } catch (e) {}
+      };
+
       // 语音输入直接调用灵珠智能体进行意图识别和搜索答案
       // 不走本地预设场景匹配，由灵珠智能体统一处理意图
       recognition.onresult = function (event) {
         self.clearAsrTimeout();
         self._listening = false;
+        self._asrGotResult = true; // 已收到识别结果，onend 不再重启
+        self._asrRestartCount = 0; // 成功捕获，重置瞬时错误重试计数
         try {
           var results = event.results;
           var idx = event.resultIndex;
@@ -692,46 +734,80 @@ export default {
             var transcript = results[idx][0].transcript.trim();
             if (transcript) self.handleVoiceInput(transcript);
           }
-        } catch (e) {}
+        } catch (e) {
+          console.error('[startRecognition] onresult 异常:', e && (e.message || String(e)));
+        }
       };
-      // 错误处理：清除超时，回待机态
+      // 错误处理：
+      // - aborted：我们主动 stopRecognition()/interruptForWakeup() 触发的，onend 会随后清理，这里直接返回
+      // - no-speech / network：瞬时错误，保持聆听会话、短暂延迟后重启 ASR（而非静默死掉）
+      // - 其余（not-allowed / audio-capture / service-not-allowed 等）：致命，播报并回待机态
       recognition.onerror = function (event) {
         self.clearAsrTimeout();
-        self._listening = false;
-        try {
-          var errMsg = (event && event.message) ? event.message : ((event && event.error) ? event.error : '未知错误');
-          self.setData({ bubble: '语音识别异常: ' + errMsg });
-        } catch (e) {}
+        var errCode = (event && event.error) ? event.error : 'unknown';
+        var errMsg = (event && event.message) ? event.message : '';
+        console.error('[startRecognition] onerror:', errCode, errMsg);
         self._recognition = null;
+        if (errCode === 'aborted') {
+          // 主动 abort，onend 会处理清理与重启判定，这里不做事
+          return;
+        }
+        if (errCode === 'no-speech' || errCode === 'network') {
+          // 瞬时错误：保持聆听会话（保留 _listening=true），交给 _restartAsrSoon 重启一轮
+          self.setData({
+            bubble: errCode === 'no-speech' ? '没听清，请再说一次' : '网络有点抖，重新听…',
+            cardTip: '正在重新聆听…',
+          });
+          self._restartAsrSoon();
+          return;
+        }
+        // 其余为致命错误：停止聆听并回待机态
+        self._listening = false;
+        // 不转译错误码，保留原始 message 供排查
+        self.setData({ bubble: '语音识别异常: ' + errCode + (errMsg ? ' (' + errMsg + ')' : '') });
+        self.speak('没听清，请再试一次');
+        var t1 = setTimeout(function () { self.toIdle(); }, 2000);
       };
-      // 识别结束：清理实例引用和超时
+      // 识别结束：
+      // - 已拿到结果：仅清理，路由交由 onresult 处理
+      // - 未拿到结果且仍在聆听会话中：自动重启 ASR，避免在"聆听中"界面卡死
+      // - 否则（主动 stop / 超时）：交给上游逻辑，不在这里重启
       recognition.onend = function () {
         self.clearAsrTimeout();
-        self._listening = false;
         self._recognition = null;
+        if (self._asrGotResult) {
+          return; // 结果已路由，无需重启
+        }
+        if (self._listening) {
+          // 自然结束但没听清 → 保持聆听，重启一轮
+          self._restartAsrSoon();
+          return;
+        }
+        // 主动停止 / 超时分支已由上游处理，这里置空即可
       };
+
       // 建立 ASR 通道
       recognition.start();
       this._recognition = recognition;
       this._listening = true;
+
       // 10 秒超时兜底：没有语音输入则播报"没有听太清"并回 idle
       // 此阶段不启动思考计时器，思考计时从 invokeAgentApi 返回后开始
       this._asrTimeout = setTimeout(function () {
         self._listening = false;
         self._asrTimeout = null;
-        // 停止当前识别
         self.stopRecognition();
-        // 播报"没有听太清"
         self.speak('没有听太清');
-        // 回待机态
         self.toIdle();
       }, 10000);
     } catch (e) {
       // SpeechRecognition 不可用或 start() 失败（InvalidStateError 等）
+      var emsg = e && (e.message || String(e)) || 'unknown';
+      console.error('[startRecognition] 异常:', emsg);
       this._listening = false;
-      try {
-        this.setData({ bubble: '语音通道暂不可用，可用按钮交互' });
-      } catch (e2) {}
+      this.setData({ bubble: '语音通道暂不可用: ' + emsg });
+      this.speak('语音通道暂不可用，请用按钮交互');
+      var t2 = setTimeout(function () { self.toIdle(); }, 2000);
     }
   },
   stopRecognition() {
@@ -743,8 +819,30 @@ export default {
       this._listening = false;
     } catch (e) {}
   },
+  // 延迟重启 ASR：用于在 no-speech / network / 自然结束未取到结果时，
+  // 维持"聆听中"会话，避免静默死掉或界面卡死。定时器幂等（多次调用只保留一个）。
+  // 带重试上限（默认 3 次），超过则优雅退回待机，防止无限循环耗电。
+  _restartAsrSoon() {
+    var self = this;
+    if (this._asrRestartTimer) { clearTimeout(this._asrRestartTimer); }
+    this._asrRestartTimer = setTimeout(function () {
+      self._asrRestartTimer = null;
+      if (self._asrGotResult) return; // 期间已拿到结果，无需重启
+      self._asrRestartCount = (self._asrRestartCount || 0) + 1;
+      if (self._asrRestartCount > 3) {
+        self._listening = false;
+        self.speak('先不听了，需要时喊我');
+        self.toIdle();
+        return;
+      }
+      self.startRecognition();
+    }, 400);
+  },
   // 语音打断：用户呼叫"小绿小绿"时，打断当前 ASR 和语音播报，回应"我在呢，你请说"，再重启 ASR
   interruptForWakeup() {
+    // 重入保护：正在处理一次打断时忽略新的唤醒，避免叠加多个定时器/实例
+    if (this._wakeupBusy) return;
+    this._wakeupBusy = true;
     // 1. 停止当前 ASR 识别
     this.stopRecognition();
     this.clearAsrTimeout();
@@ -772,6 +870,7 @@ export default {
     if (this._interruptTimer) { clearTimeout(this._interruptTimer); }
     this._interruptTimer = setTimeout(function () {
       self._interruptTimer = null;
+      self._wakeupBusy = false;
       self.startRecognition();
     }, 1500);
   },
@@ -791,8 +890,11 @@ export default {
       // 其他 keyword / clickAiAssist 直接调用灵珠智能体进行意图识别和搜索答案
       if (kw) {
         this.handleVoiceInput(kw);
+        return;  // 唤醒词本身已是用户问题，交给灵珠处理，不再启动 ASR 等待
       }
-      // 建立 ASR 通道：onVoiceWakeup 是宿主交互信号，满足 start() 的交互状态要求
+      // 无 keyword（纯唤醒信号）→ 建立 ASR 通道等待用户说出问题
+      // 重入保护：已在聆听中则忽略，避免叠加多个识别实例
+      if (this._listening) return;
       this.startRecognition();
     } catch (e) { this.toIdle(); }
   },
@@ -802,6 +904,8 @@ export default {
   handleVoiceInput(text) {
     var t = (text || '').trim();
     if (!t) { this.toIdle(); return; }
+    // 重入保护：已在 agent 联网回答态则忽略迟到的重复输入，避免重复路由
+    if (this._mode === 'agent') { return; }
     var s = decay(load());
     // 显示连接态：语音输入已收到，正在发送给灵珠智能体
     // 此阶段不启动思考计时，思考计时从 invokeAgentApi 返回后开始
@@ -969,6 +1073,10 @@ export default {
   // 场景8：状态栏待机态（状态卡片，仅角色 + 1 行文字，无边框）
   toIdle(force) {
     var s = decay(load());
+    // 回到待机态时清理语音识别残留状态，保证下一轮聆听干净
+    this._asrGotResult = false;
+    this._asrRestartCount = 0;
+    if (this._asrRestartTimer) { clearTimeout(this._asrRestartTimer); this._asrRestartTimer = null; }
     var night = (hourOf() >= 23 || hourOf() < 6);
     var expr = night ? 'sleepy' : 'idle';
     var tip = night ? '夜间睡眠态 z' : '持续常驻 · 缓慢呼吸';
@@ -1262,7 +1370,7 @@ export default {
   onTapB() { this.handleInput('日程'); },
   onTapC() { this.handleInput('久坐'); },
   onTapD() { this.handleInput('天气'); },
-  onTapE() { this.handleInput('什么是人工智能'); },
+  onTapE() { this.startRecognition(); },
   onTapF() { this.handleInput('陪我'); },
   onTapG() {
     var s = decay(load());
